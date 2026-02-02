@@ -43,4 +43,4 @@
 * **Library:** `Crawl4AI` (AsyncWebCrawler)
 * **Total URLs Discovered:** ~5,300+
 * **Data Format:** JSON Lines (`.jsonl`)
-* **Resilience:** Fully idempotent (safe to re-run without data loss).
+* **Resilience:** Fully idempotent (safe to re-run without data loss).6
