@@ -1,117 +1,57 @@
 import os
-import sys
-import time
 from dotenv import load_dotenv
-
-# --- IMPORTS ---
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from langchain_core.documents import Document 
+from langchain_groq import ChatGroq
 
-# 1. Load Secrets (FORCE RE-READ)
+# 1. Load Secrets
 load_dotenv(override=True)
-
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-
-# --- DEBUG CHECK ---
-if GOOGLE_API_KEY:
-    print(f"🔑 DEBUG: Using API Key ending in: ...{GOOGLE_API_KEY[-4:]}")
-else:
-    print("❌ Error: Keys are missing from .env file!")
-    sys.exit(1)
-# -------------------
-
 INDEX_NAME = "ccr-regulations"
-os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-def main():
-    print("🤖 Initializing AI Agent (Gemini Flash Latest + Text-Embedding-004)...")
+print("🧠 Initializing AI Agent (Llama 3 on Groq + Local Embeddings)...")
 
-    # 2. Connect to Database (Pinecone)
-    # MUST match the model used in reset_database.py (768 dimensions)
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    
-    try:
-        vectorstore = PineconeVectorStore.from_existing_index(
-            index_name=INDEX_NAME,
-            embedding=embeddings
-        )
-    except Exception as e:
-        print(f"⚠️ Connection Error: {e}")
-        return
+try:
+    # 2. MATCH THE DATABASE: Local MiniLM Embeddings (384 dimensions)
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-    # 3. Connect to Brain (Gemini Flash Latest)
-    # Using the 'latest' alias is usually safer for Rate Limits on free tiers
-    llm = ChatGoogleGenerativeAI(
-        model="models/gemini-flash-latest", 
-        temperature=0.3
-    )
+    # 3. Connect to Pinecone
+    vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
-    print("\n💬 Agent is Ready! (Type 'exit' to quit)")
-    print("------------------------------------------------")
+    # 4. Initialize the "Brain" (Meta's Llama 3 running on Groq)
+    llm = ChatGroq(model_name="llama-3.1-8b-instant", temperature=0)
 
+    print("✅ Agent is online and ready! (Type 'quit' to exit)\n")
+
+    # 5. Start the Chat Loop
     while True:
-        query = input("\nUser: ")
-        if query.lower() in ["exit", "quit"]:
+        user_input = input("User: ")
+        if user_input.lower() in ['quit', 'exit']:
             break
             
-        try:
-            print("Thinking...", end="", flush=True)
-            
-            # --- RETRY LOGIC ---
-            retries = 3
-            search_results = None
-            
-            for attempt in range(retries):
-                try:
-                    search_results = vectorstore.similarity_search(query, k=3)
-                    break 
-                except Exception as e:
-                    # Catch Rate Limits
-                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                        print(f"\n⏳ Rate limit hit. Waiting 10 seconds (Attempt {attempt+1}/{retries})...")
-                        time.sleep(10)
-                    else:
-                        raise e 
-            
-            if not search_results:
-                print("\n🤖 AI: I couldn't find any relevant documents.")
-                continue
+        print("Thinking...")
+        
+        # Step A: Search Pinecone
+        relevant_docs = retriever.invoke(user_input)
+        
+        # Step B: Mash text together
+        context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
+        
+        # Step C: Build the Prompt
+        prompt = f"""You are a highly accurate legal compliance assistant for the California Code of Regulations (CCR).
+Use the following pieces of retrieved context to answer the user's question.
+If you don't know the answer or if it is not clearly stated in the context, just say 'I don't know'. Do not try to make up an answer or hallucinate outside information.
 
-            context_text = "\n\n".join([doc.page_content for doc in search_results])
+Context:
+{context_text}
 
-            # --- PROMPT ---
-            final_prompt = f"""
-            You are a Legal Compliance Assistant.
-            
-            - If the user greets you (hi/hello), reply politely.
-            - Otherwise, use the context below to answer the question.
-            - If the answer is not in the context, say "I don't know."
+Question: {user_input}
+"""
+        
+        # Step D: Get the answer!
+        response = llm.invoke(prompt)
+        print(f"🤖 Agent: {response.content}\n")
+        print("-" * 50)
 
-            CONTEXT:
-            {context_text}
-
-            QUESTION: 
-            {query}
-            """
-
-            response = llm.invoke(final_prompt)
-            
-            # --- CLEANER: Remove weird JSON/List artifacts ---
-            answer_text = response.content
-            
-            # If Google sends a list/box, extract the text inside
-            if isinstance(answer_text, list) and len(answer_text) > 0:
-                if 'text' in answer_text[0]:
-                    answer_text = answer_text[0]['text']
-            
-            # Print the clean answer
-            print(f"\n\n🤖 AI: {str(answer_text).strip()}")
-            
-        except Exception as e:
-            print(f"\n❌ Error: {e}")
-
-if __name__ == "__main__":
-    main()
+except Exception as e:
+    print(f"\n❌ Critical Error: {e}")
